@@ -1,90 +1,70 @@
-package com.proton.espbluefildemo;
+package com.proton.espbluefildemo.utils;
 
-import android.Manifest;
-import android.annotation.SuppressLint;
-import android.app.Dialog;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
 import android.bluetooth.BluetoothGattCallback;
 import android.bluetooth.BluetoothGattCharacteristic;
-import android.bluetooth.BluetoothGattDescriptor;
 import android.bluetooth.BluetoothGattService;
 import android.bluetooth.BluetoothProfile;
 import android.content.Context;
 import android.location.LocationManager;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.SystemClock;
-import android.support.v4.widget.SwipeRefreshLayout;
-import android.support.v7.app.AppCompatActivity;
-import android.os.Bundle;
-import android.support.v7.widget.LinearLayoutManager;
-import android.support.v7.widget.RecyclerView;
 import android.text.TextUtils;
-import android.util.Log;
-import android.view.View;
-import android.view.ViewGroup;
-import android.widget.Button;
-import android.widget.EditText;
-import android.widget.Toast;
-
-import com.proton.espbluefildemo.adapter.DevicesAdapter;
-import com.proton.espbluefildemo.utils.BluFiUtil;
-import com.proton.espbluefildemo.view.LoadingDialog;
-import com.tbruyelle.rxpermissions2.RxPermissions;
-import com.wms.adapter.recyclerview.OnItemClickListener;
+import com.proton.espbluefildemo.BlufiApp;
+import com.proton.espbluefildemo.BlufiConstants;
+import com.proton.espbluefildemo.SettingsConstants;
 import com.wms.logger.Logger;
-import com.wms.utils.NetUtils;
-
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-
 import blufi.espressif.BlufiCallback;
 import blufi.espressif.BlufiClient;
 import blufi.espressif.params.BlufiConfigureParams;
 import blufi.espressif.params.BlufiParameter;
-import blufi.espressif.response.BlufiStatusResponse;
-import blufi.espressif.response.BlufiVersionResponse;
-import io.reactivex.functions.Consumer;
 import libs.espressif.app.SdkUtil;
 import libs.espressif.ble.EspBleUtils;
 import libs.espressif.ble.ScanListener;
 
-public class ConfigNetActivity extends AppCompatActivity implements View.OnClickListener, SwipeRefreshLayout.OnRefreshListener {
-    private static final long TIMEOUT_SCAN = 4000L;
-    final RxPermissions rxPermissions = new RxPermissions(this);
-    EditText etSsid, etPwd;
-    Button btnConfig;
+/**
+ * Created by yuxiongfeng.
+ * Date: 2019/6/6
+ */
+public class BluFiUtil {
+
+    private static final long TIMEOUT_SCAN = 2000L;
+    private Context mContext;
+    private String ssid;
+    private String pwd;
 
     /**
      * 扫描设备
      */
-    RecyclerView recyclerview;
-    private List<BluetoothDevice> mBleList;
+    private List<BluetoothDevice> mBleList=new LinkedList<>();
     private Map<BluetoothDevice, Integer> mDeviceRssiMap;//为了根据信号强度排序
     private ExecutorService mThreadPool;//扫描设备时需要的线程池
     private ScanCallback mScanCallback;
     private Future mUpdateFuture;
     private long mScanStartTime;
-    private DevicesAdapter adapter;
-    SwipeRefreshLayout mRefreshLayout;
     private String mBlufiFilter = "BLUFI";
-    private BluetoothDevice mDevice;
 
     /**
      * 设备连接
      */
     private BluetoothGatt mGatt;
     private boolean mConnected;
-    private Context mContext;
+
+    OnBluFiSetNetworkListener bluFiSetNetworkListener;
+    private Handler mHandler = new Handler(Looper.getMainLooper());
 
     /**
      * 配网
@@ -92,157 +72,78 @@ public class ConfigNetActivity extends AppCompatActivity implements View.OnClick
      * @param savedInstanceState
      */
     BlufiClient mBlufiClient;
-    private String wifiName;
-    LoadingDialog dialog;
 
-    @SuppressLint("CheckResult")
-    @Override
-    protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
-        setContentView(R.layout.activity_config_net_layout);
-        initView();
-        mThreadPool = Executors.newSingleThreadExecutor();
-        mDeviceRssiMap = new HashMap<>();
-        mContext=this;
-
-        rxPermissions
-                .request(Manifest.permission.ACCESS_COARSE_LOCATION)
-                .subscribe(new Consumer<Boolean>() {
-                    @Override
-                    public void accept(Boolean granted) {
-                        if (granted) {
-//                            scanDevice();
-                        } else {
-                            Toast.makeText(ConfigNetActivity.this, "没有权限", Toast.LENGTH_SHORT).show();
-                            finish();
-                        }
-                    }
-                });
+    private static class Inner {
+        private static final BluFiUtil instance = new BluFiUtil();
     }
 
-    private void initView() {
-        dialog=new LoadingDialog(this);
-        etSsid = findViewById(R.id.et_wifi_ssid);
-        etPwd = findViewById(R.id.et_wifi_password);
-        btnConfig = findViewById(R.id.btn_config);
-        recyclerview = findViewById(R.id.recyclerview);
-        mRefreshLayout = findViewById(R.id.swipefreshview);
-        btnConfig.setOnClickListener(this);
-        mRefreshLayout.setOnRefreshListener(this);
-
-        mBleList = new LinkedList<>();
-        adapter = new DevicesAdapter(this, mBleList, android.R.layout.simple_list_item_2);
-        recyclerview.setAdapter(adapter);
-        recyclerview.setLayoutManager(new LinearLayoutManager(this));
-        String connectWifiSsid = NetUtils.getConnectWifiSsid(this);
-
-        wifiName = connectWifiSsid.replace('"', ' ').replace('"', ' ').trim();
-        etSsid.setText(wifiName);
-
-
+    public static BluFiUtil getInstance() {
+        return Inner.instance;
     }
 
-    private void onIntervalScanUpdate(final boolean over) {
-
-        final List<BluetoothDevice> devices = new LinkedList<>(mDeviceRssiMap.keySet());
-        Collections.sort(devices, new Comparator<BluetoothDevice>() {
-            @Override
-            public int compare(BluetoothDevice dev1, BluetoothDevice dev2) {
-                Integer rssi1 = mDeviceRssiMap.get(dev1);
-                Integer rssi2 = mDeviceRssiMap.get(dev2);
-                return rssi2.compareTo(rssi1);
-            }
-        });
-
-        runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                mBleList.clear();
-                mBleList.addAll(devices);
-                adapter.notifyDataSetChanged();
-                if (over) {
-                    mRefreshLayout.setRefreshing(false);
-                }
-            }
-        });
-    }
-
-    @Override
-    public void onClick(View v) {
-        switch (v.getId()) {
-            case R.id.btn_config:
-//                configWifi();
-                BluFiUtil.getInstance().startConfigWifi(mContext, wifiName, etPwd.getText().toString().trim(), new BluFiUtil.OnBluFiSetNetworkListener() {
-                    @Override
-                    public void onStart() {
-                        if (dialog==null) {
-                            dialog=new LoadingDialog(ConfigNetActivity.this);
-                        }
-                        dialog.show();
-                    }
-
-                    @Override
-                    public void onSuccess(String macaddress, String bssid) {
-                        dialog.dismiss();
-                    }
-
-                    @Override
-                    public void onFail() {
-                        dialog.dismiss();
-                    }
-
-                    @Override
-                    public void onNotFound() {
-                        dialog.dismiss();
-                    }
-                });
-                break;
+    /**
+     * 开始配网入口
+     * @param context
+     * @param ssid
+     * @param pwd
+     * @param listener
+     */
+    public void startConfigWifi(Context context, String ssid, String pwd, OnBluFiSetNetworkListener listener) {
+        if (TextUtils.isEmpty(ssid)) {
+            Logger.w("ssid is null");
+            return;
         }
-    }
 
-    @Override
-    public void onRefresh() {
-//        scanDevice();
-    }
-
-
-    @Override
-    protected void onDestroy() {
-        super.onDestroy();
-        stopScan();
+        if (TextUtils.isEmpty(pwd)) {
+            Logger.w("pwd is null");
+            return;
+        }
 
 
         if (mBlufiClient != null) {
-            mBlufiClient.requestCloseConnection();
-        }
-
-        if (mBlufiClient != null) {
-            mBlufiClient.close(); //释放资源
+            mBlufiClient.close();
             mBlufiClient = null;
         }
+
         if (mGatt != null) {
+            mGatt.disconnect();
             mGatt.close();
         }
 
+        stopScan();
+
+        this.mContext = context;
+        this.ssid = ssid;
+        this.pwd = pwd;
+        this.bluFiSetNetworkListener = listener;
+
+        mThreadPool = Executors.newSingleThreadExecutor();
+        mDeviceRssiMap = new HashMap<>();
+
+        saveStartListener();
+        scanDevice();
 
     }
 
     /**
      * 扫描设备
      */
+    /**
+     * 扫描设备
+     */
     private void scanDevice() {
         if (!BluetoothAdapter.getDefaultAdapter().isEnabled()) {
-            Toast.makeText(this, "bluetooot is unEnabled", Toast.LENGTH_SHORT).show();
+            saveFailListener();
             return;
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            LocationManager locationManager = (LocationManager) getSystemService(LOCATION_SERVICE);
+            LocationManager locationManager = (LocationManager) mContext.getSystemService(Context.LOCATION_SERVICE);
             if (locationManager != null) {
                 boolean locationGPS = locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER);
                 boolean locationNetwork = locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
                 if (!locationGPS && !locationNetwork) {
-                    Toast.makeText(this, "location is disable", Toast.LENGTH_SHORT).show();
+                    saveFailListener();
                     return;
                 }
             }
@@ -250,12 +151,9 @@ public class ConfigNetActivity extends AppCompatActivity implements View.OnClick
 
         mScanCallback = new ScanCallback();
         EspBleUtils.startScanBle(mScanCallback);
-//        Logger.v("开始扫描设备。。。");
-        Log.d("yxf","开始扫描。。。");
-
+        Logger.v("开始扫描设备。。。");
         mDeviceRssiMap.clear();
         mBleList.clear();
-        adapter.notifyDataSetChanged();
 
         mScanStartTime = SystemClock.elapsedRealtime();
         mUpdateFuture = mThreadPool.submit(new Runnable() {
@@ -265,39 +163,57 @@ public class ConfigNetActivity extends AppCompatActivity implements View.OnClick
                         , "  current thread interrupted :", Thread.currentThread().isInterrupted());
 
                 while (!Thread.currentThread().isInterrupted()) {
-
                     try {
                         Thread.sleep(1000);
                     } catch (InterruptedException e) {
                         e.printStackTrace();
                         break;
                     }
-
                     long scanCost = SystemClock.elapsedRealtime() - mScanStartTime;
                     if (scanCost > TIMEOUT_SCAN) {
-                        stopScan();
+                        connect();
                         break;
                     }
-                    onIntervalScanUpdate(false);
+                    onIntervalScanUpdate();
                 }
-                onIntervalScanUpdate(true);
-
             }
         });
+    }
 
+    /**
+     * 获取peripheral设备
+     */
+    private void onIntervalScanUpdate() {
+        final List<BluetoothDevice> devices = new LinkedList<>(mDeviceRssiMap.keySet());
+        Collections.sort(devices, new Comparator<BluetoothDevice>() {
+            @Override
+            public int compare(BluetoothDevice dev1, BluetoothDevice dev2) {
+                Integer rssi1 = mDeviceRssiMap.get(dev1);
+                Integer rssi2 = mDeviceRssiMap.get(dev2);
+                return rssi2.compareTo(rssi1);
+            }
+        });
+        mBleList.clear();
+        mBleList.addAll(devices);
     }
 
     /**
      * 停止扫描设备
      */
     private void stopScan() {
-        EspBleUtils.stopScanBle(mScanCallback);
+        if (mScanCallback != null) {
+            EspBleUtils.stopScanBle(mScanCallback);
+        }
         if (mUpdateFuture != null) {
             mUpdateFuture.cancel(true);
         }
         Logger.v("stop ble scan");
     }
 
+    /**
+     * 根据信号强度rssi
+     * 连接设备
+     */
     /**
      * 连接设备
      */
@@ -310,11 +226,16 @@ public class ConfigNetActivity extends AppCompatActivity implements View.OnClick
             mGatt.close();
         }
 
+        if (mBleList == null || mBleList.size() == 0) {
+            saveNotFoundListener();
+            return;
+        }
+
         GattCallback callback = new GattCallback();
         if (SdkUtil.isAtLeastM_23()) {
-            mGatt = mDevice.connectGatt(this, false, callback, BluetoothDevice.TRANSPORT_LE);
+            mGatt = mBleList.get(0).connectGatt(mContext, false, callback, BluetoothDevice.TRANSPORT_LE);
         } else {
-            mGatt = mDevice.connectGatt(this, false, callback);
+            mGatt = mBleList.get(0).connectGatt(mContext, false, callback);
         }
     }
 
@@ -322,57 +243,49 @@ public class ConfigNetActivity extends AppCompatActivity implements View.OnClick
      * 配置网络
      */
     private void configWifi() {
-
         Logger.v("开始配置wifi。。。");
-
         if (!mConnected) {
+            saveFailListener();
             return;
         }
-        String ssid = etSsid.getText().toString();
         String wifiName = ssid.replace('"', ' ').replace('"', ' ').trim();
-        String password = etPwd.getText().toString();
-
-        if (TextUtils.isEmpty(ssid)) {
-            Toast.makeText(this, "wifi ssid 不能为空", Toast.LENGTH_SHORT).show();
-           return;
-        }
-
-        if (TextUtils.isEmpty(password)) {
-            Toast.makeText(this, "wifi 密码不能为空", Toast.LENGTH_SHORT).show();
-            return;
-        }
-
         BlufiConfigureParams params = new BlufiConfigureParams();
-        params.setOpMode( BlufiParameter.OP_MODE_STA);
-        params.setStaSSIDBytes( wifiName.getBytes());
-        params.setStaPassword(password);
-        if (mBlufiClient==null) {
+        params.setOpMode(BlufiParameter.OP_MODE_STA);
+        params.setStaSSIDBytes(wifiName.getBytes());
+        params.setStaPassword(pwd);
+        if (mBlufiClient == null) {
             Logger.e("blufiClient 为 null");
             return;
         }
         mBlufiClient.configure(params);
     }
 
+
+    /**
+     * 扫描设备的回调
+     */
     private class ScanCallback implements ScanListener {
         @Override
         public void onLeScan(BluetoothDevice device, int rssi, byte[] scanRecord) {
-
             String name = device.getName();
             if (!TextUtils.isEmpty(mBlufiFilter)) {
                 if (name == null || !name.startsWith(mBlufiFilter)) {
                     return;
                 }
             }
-            Logger.v("扫描到的设备: name = "+device.getName() ,"address = "+device.getAddress());
+            Logger.v("扫描到的设备: name = " + device.getName(), "address = " + device.getAddress());
             mDeviceRssiMap.put(device, rssi);
         }
     }
 
+
+    /**
+     * 连接设备的回调
+     */
     private class GattCallback extends BluetoothGattCallback {
 
         @Override
         public void onConnectionStateChange(BluetoothGatt gatt, int status, int newState) {
-            String devAddr = gatt.getDevice().getAddress();
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 switch (newState) {
                     case BluetoothProfile.STATE_CONNECTED:
@@ -382,12 +295,13 @@ public class ConfigNetActivity extends AppCompatActivity implements View.OnClick
                         break;
                     case BluetoothProfile.STATE_DISCONNECTED:
                         gatt.close();
-                        Logger.v("设备连接失败。。。");
+                        saveFailListener();
                         mConnected = false;
                         break;
                 }
             } else {
                 gatt.close();
+                saveFailListener();
                 Logger.v("设备连接失败。。。");
             }
         }
@@ -405,12 +319,14 @@ public class ConfigNetActivity extends AppCompatActivity implements View.OnClick
                 if (service == null) {
                     Logger.v("discover services fail ");
                     gatt.disconnect();
+                    saveFailListener();
                 }
                 //获得 BluetoothGattCharacteristic  用于app向设备写数据
                 BluetoothGattCharacteristic writeCharact = service.getCharacteristic(BlufiConstants.UUID_WRITE_CHARACTERISTIC);
                 if (writeCharact == null) {
                     Logger.v("get writeCharact fail");
                     gatt.disconnect();
+                    saveFailListener();
                 }
 
                 //接收device向app推送的消息
@@ -418,8 +334,8 @@ public class ConfigNetActivity extends AppCompatActivity implements View.OnClick
                 if (notifyCharact == null) {
                     Logger.v("get notification characteristic fail");
                     gatt.disconnect();
+                    saveFailListener();
                 }
-
 
                 /**
                  * 配网客户端
@@ -440,11 +356,23 @@ public class ConfigNetActivity extends AppCompatActivity implements View.OnClick
                     }
                 }
 
+                mThreadPool.submit(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            Thread.sleep(500);
+                        } catch (InterruptedException e) {
+                            e.printStackTrace();
+                        }
+                        configWifi();
+                    }
+                });
+
             } else {
                 gatt.disconnect();
+                saveFailListener();
             }
         }
-
 
         @Override
         public void onCharacteristicWrite(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, int status) {
@@ -462,57 +390,98 @@ public class ConfigNetActivity extends AppCompatActivity implements View.OnClick
         @Override
         public void onMtuChanged(BluetoothGatt gatt, int mtu, int status) {
             super.onMtuChanged(gatt, mtu, status);
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                if (mBlufiClient != null) {
-                    mBlufiClient.setPostPackageLengthLimit(mtu - 3);//设置 Blufi 发送数据时每包数据的最大长度
-                }
-            }
         }
     }
 
+
     private class BlufiCallbackMain extends BlufiCallback {
-
-        // 收到 Device 的通知数据
-        // 返回 false 表示处理尚未结束，交给 BlufiClient 继续后续处理
-        // 返回 true 表示处理结束，后续将不再解析该数据，也不会调用回调方法
-        public boolean onGattNotification(BlufiClient client, int pkgType, int subType, byte[] data) {
-            return false;
-        }
-
-        // BluetoothGatt 关闭时调用
-        public void onGattClose(BlufiClient client) {
-            Logger.v("client close");
-        }
-
-        // 收到 Device 发出的错误代码
-        public void onError(BlufiClient client, int errCode) {
-
-        }
 
         // 发送配置信息的结果
         public void onConfigureResult(BlufiClient client, int status) {
             switch (status) {
                 case STATUS_SUCCESS:
-                    Logger.v("设备配网成功");
-                    Toast.makeText(ConfigNetActivity.this, "配网成功", Toast.LENGTH_SHORT).show();
+                    saveSuccessListener(mBleList.get(0).getAddress(), ssid);
                     break;
                 default:
-                    Logger.v("设备配网失败");
+                    saveFailListener();
                     break;
             }
         }
 
-        // 收到 Device 的版本信息
-        public void onDeviceVersionResponse(BlufiClient client, int status, BlufiVersionResponse response) {
+    }
 
-        }
+    /**
+     * 开始配网的回调
+     */
+    private void saveStartListener() {
+        mHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                bluFiSetNetworkListener.onStart();
+            }
+        });
+    }
 
-        // 收到 Device 的状态信息
-        public void onDeviceStatusResponse(BlufiClient client, int status, BlufiStatusResponse response) {
+    /**
+     * 配网成功的回调
+     *
+     * @param macaddress
+     * @param bssid
+     */
+    private void saveSuccessListener(final String macaddress, final String bssid) {
+        mHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                bluFiSetNetworkListener.onSuccess(macaddress, bssid);
+            }
+        });
+    }
 
-        }
+    /**
+     * 配网失败的回调
+     */
+    private void saveFailListener() {
+        mHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                bluFiSetNetworkListener.onFail();
+            }
+        });
+    }
+
+    /**
+     * 没有搜到可用设备的回调
+     */
+    private void saveNotFoundListener() {
+        mHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                bluFiSetNetworkListener.onNotFound();
+            }
+        });
     }
 
 
+    public interface OnBluFiSetNetworkListener {
+        /**
+         * 开始配网
+         */
+        void onStart();
+
+        /**
+         * 配网成功
+         */
+        void onSuccess(String macaddress, String bssid);
+
+        /**
+         * 配网失败
+         */
+        void onFail();
+
+        /**
+         * 没搜索到设备
+         */
+        void onNotFound();
+    }
 
 }
